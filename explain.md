@@ -1,134 +1,194 @@
-import contextlib
-import gc
-import os
-import re
+# Detailed Explanation of the Bark Codebase
 
-from encodec import EncodecModel
-import funcy
-import logging
-import numpy as np
-from scipy.special import softmax
-import torch
-import torch.nn.functional as F
-import tqdm
-from transformers import BertTokenizer
-from huggingface_hub import hf_hub_download
+## `bark/api.py`
 
-from .model import GPTConfig, GPT
-from .model_fine import FineGPT, FineGPTConfig
+This file contains functions for generating semantic arrays from text, converting semantic tokens to waveforms, saving prompts, and generating audio.
 
-if (
-    torch.cuda.is_available() and
-    hasattr(torch.cuda, "amp") and
-    hasattr(torch.cuda.amp, "autocast") and
-    hasattr(torch.cuda, "is_bf16_supported") and
-    torch.cuda.is_bf16_supported()
+### Functions
+
+#### `text_to_semantic`
+
+```python
+def text_to_semantic(
+    text: str,
+    history_prompt: Optional[Union[Dict, str]] = None,
+    temp: float = 0.7,
+    silent: bool = False,
 ):
-    autocast = funcy.partial(torch.cuda.amp.autocast, dtype=torch.bfloat16)
-else:
-    @contextlib.contextmanager
-    def autocast():
-        yield
+    """Generate semantic array from text.
 
+    Args:
+        text: text to be turned into audio
+        history_prompt: history choice for audio cloning
+        temp: generation temperature (1.0 more diverse, 0.0 more conservative)
+        silent: disable progress bar
 
-# hold models in global scope to lazy load
-global models
-models = {}
-
-global models_devices
-models_devices = {}
-
-
-CONTEXT_WINDOW_SIZE = 1024
-
-SEMANTIC_RATE_HZ = 49.9
-SEMANTIC_VOCAB_SIZE = 10_000
-
-CODEBOOK_SIZE = 1024
-N_COARSE_CODEBOOKS = 2
-N_FINE_CODEBOOKS = 8
-COARSE_RATE_HZ = 75
-
-SAMPLE_RATE = 24_000
-
-
-SUPPORTED_LANGS = [
-    ("English", "en"),
-    ("German", "de"),
-    ("Spanish", "es"),
-    ("French", "fr"),
-    ("Hindi", "hi"),
-    ("Italian", "it"),
-    ("Japanese", "ja"),
-    ("Korean", "ko"),
-    ("Polish", "pl"),
-    ("Portuguese", "pt"),
-    ("Russian", "ru"),
-    ("Turkish", "tr"),
-    ("Chinese", "zh"),
-]
-
-ALLOWED_PROMPTS = {"announcer"}
-for _, lang in SUPPORTED_LANGS:
-    for prefix in ("", f"v2{os.path.sep}"):
-        for n in range(10):
-            ALLOWED_PROMPTS.add(f"{prefix}{lang}_speaker_{n}")
-
-
-logger = logging.getLogger(__name__)
-
-
-CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-
-
-default_cache_dir = os.path.join(os.path.expanduser("~"), ".cache")
-CACHE_DIR = os.path.join(os.getenv("XDG_CACHE_HOME", default_cache_dir), "suno", "bark_v0")
-
-
-def _cast_bool_env_var(s):
-    return s.lower() in ('true', '1', 't')
-
-
-USE_SMALL_MODELS = _cast_bool_env_var(os.environ.get("SUNO_USE_SMALL_MODELS", "False"))
-GLOBAL_ENABLE_MPS = _cast_bool_env_var(os.environ.get("SUNO_ENABLE_MPS", "False"))
-OFFLOAD_CPU = _cast_bool_env_var(os.environ.get("SUNO_OFFLOAD_CPU", "False"))
-
-
-REMOTE_MODEL_PATHS = {
-    "text_small": {
-        "repo_id": "suno/bark",
-        "file_name": "text.pt",
-    },
-    "coarse_small": {
-        "repo_id": "suno/bark",
-        "file_name": "coarse.pt",
-    },
-    "fine_small": {
-        "repo_id": "suno/bark",
-        "file_name": "fine.pt",
-    },
-    "text": {
-        "repo_id": "suno/bark",
-        "file_name": "text_2.pt",
-    },
-    "coarse": {
-        "repo_id": "suno/bark",
-        "file_name": "coarse_2.pt",
-    },
-    "fine": {
-        "repo_id": "suno/bark",
-        "file_name": "fine_2.pt",
-    },
-}
-
-
-if not hasattr(torch.nn.functional, 'scaled_dot_product_attention') and torch.cuda.is_available():
-    logger.warning(
-        "torch version does not support flash attention. You will get faster" +
-        " inference speed by upgrade torch to newest nightly version."
+    Returns:
+        numpy semantic array to be fed into `semantic_to_waveform`
+    """
+    x_semantic = generate_text_semantic(
+        text,
+        history_prompt=history_prompt,
+        temp=temp,
+        silent=silent,
+        use_kv_caching=True
     )
+    return x_semantic
+```
 
+This function generates a semantic array from the input text. It takes the following parameters:
+- `text`: The text to be turned into audio.
+- `history_prompt`: An optional history choice for audio cloning.
+- `temp`: The generation temperature (1.0 more diverse, 0.0 more conservative).
+- `silent`: A boolean to disable the progress bar.
 
+The function returns a numpy semantic array to be fed into `semantic_to_waveform`.
+
+#### `semantic_to_waveform`
+
+```python
+def semantic_to_waveform(
+    semantic_tokens: np.ndarray,
+    history_prompt: Optional[Union[Dict, str]] = None,
+    temp: float = .7,
+    silent: bool = False,
+    output_full: bool = False,
+):
+    """Generate audio array from semantic input.
+
+    Args:
+        semantic_tokens: semantic token output from `text_to_semantic`
+        history_prompt: history choice for audio cloning
+        temp: generation temperature (1.0 more diverse, 0.0 more conservative)
+        silent: disable progress bar
+        output_full: return full generation to be used as a history prompt
+
+    Returns:
+        numpy audio array at sample frequency 24khz
+    """
+    coarse_tokens = generate_coarse(
+        semantic_tokens,
+        history_prompt=history_prompt,
+        temp=temp,
+        silent=silent,
+        use_kv_caching=True
+    )
+    fine_tokens = generate_fine(
+        coarse_tokens,
+        history_prompt=history_prompt,
+        temp=0.5,
+    )
+    audio_arr = codec_decode(fine_tokens)
+    if output_full:
+        full_generation = {
+            "semantic_prompt": semantic_tokens,
+            "coarse_prompt": coarse_tokens,
+            "fine_prompt": fine_tokens,
+        }
+        return full_generation, audio_arr
+    return audio_arr
+```
+
+This function generates an audio array from the semantic input. It takes the following parameters:
+- `semantic_tokens`: The semantic token output from `text_to_semantic`.
+- `history_prompt`: An optional history choice for audio cloning.
+- `temp`: The generation temperature (1.0 more diverse, 0.0 more conservative).
+- `silent`: A boolean to disable the progress bar.
+- `output_full`: A boolean to return the full generation to be used as a history prompt.
+
+The function returns a numpy audio array at a sample frequency of 24khz.
+
+#### `save_as_prompt`
+
+```python
+def save_as_prompt(filepath, full_generation):
+    """Save the full generation as a prompt file.
+
+    Args:
+        filepath: path to save the prompt file
+        full_generation: dictionary containing semantic, coarse, and fine prompts
+
+    Returns:
+        None
+    """
+    assert(filepath.endswith(".npz"))
+    assert(isinstance(full_generation, dict))
+    assert("semantic_prompt" in full_generation)
+    assert("coarse_prompt" in full_generation)
+    assert("fine_prompt" in full_generation)
+    np.savez(filepath, **full_generation)
+```
+
+This function saves the full generation as a prompt file. It takes the following parameters:
+- `filepath`: The path to save the prompt file.
+- `full_generation`: A dictionary containing semantic, coarse, and fine prompts.
+
+The function does not return any value.
+
+#### `generate_audio`
+
+```python
+def generate_audio(
+    text: str,
+    history_prompt: Optional[Union[Dict, str]] = None,
+    text_temp: float = 0.7,
+    waveform_temp: float = 0.7,
+    silent: bool = False,
+    output_full: bool = False,
+):
+    """Generate audio array from input text.
+
+    Args:
+        text: text to be turned into audio
+        history_prompt: history choice for audio cloning
+        text_temp: generation temperature (1.0 more diverse, 0.0 more conservative)
+        waveform_temp: generation temperature (1.0 more diverse, 0.0 more conservative)
+        silent: disable progress bar
+        output_full: return full generation to be used as a history prompt
+
+    Returns:
+        numpy audio array at sample frequency 24khz
+    """
+    semantic_tokens = text_to_semantic(
+        text,
+        history_prompt=history_prompt,
+        temp=text_temp,
+        silent=silent,
+    )
+    out = semantic_to_waveform(
+        semantic_tokens,
+        history_prompt=history_prompt,
+        temp=waveform_temp,
+        silent=silent,
+        output_full=output_full,
+    )
+    if output_full:
+        full_generation, audio_arr = out
+        return full_generation, audio_arr
+    else:
+        audio_arr = out
+    return audio_arr
+```
+
+This function generates an audio array from the input text. It takes the following parameters:
+- `text`: The text to be turned into audio.
+- `history_prompt`: An optional history choice for audio cloning.
+- `text_temp`: The generation temperature for text (1.0 more diverse, 0.0 more conservative).
+- `waveform_temp`: The generation temperature for waveform (1.0 more diverse, 0.0 more conservative).
+- `silent`: A boolean to disable the progress bar.
+- `output_full`: A boolean to return the full generation to be used as a history prompt.
+
+The function returns a numpy audio array at a sample frequency of 24khz.
+
+## `bark/generation.py`
+
+This file contains the main generation functionality, including model loading, tokenization, and audio code generation.
+
+### Functions
+
+#### `_grab_best_device`
+
+```python
 def _grab_best_device(use_gpu=True):
     if torch.cuda.device_count() > 0 and use_gpu:
         device = "cuda"
@@ -137,20 +197,46 @@ def _grab_best_device(use_gpu=True):
     else:
         device = "cpu"
     return device
+```
 
+This function determines the best available device (GPU, MPS, or CPU) for model execution. It takes the following parameter:
+- `use_gpu`: A boolean indicating whether to use GPU if available.
 
+The function returns the best available device as a string.
+
+#### `_get_ckpt_path`
+
+```python
 def _get_ckpt_path(model_type, use_small=False):
     key = model_type
     if use_small or USE_SMALL_MODELS:
         key += "_small"
     return os.path.join(CACHE_DIR, REMOTE_MODEL_PATHS[key]["file_name"])
+```
 
+This function constructs the checkpoint path for a given model type. It takes the following parameters:
+- `model_type`: The type of the model (e.g., "text", "coarse", "fine").
+- `use_small`: A boolean indicating whether to use the small model.
 
+The function returns the checkpoint path as a string.
+
+#### `_download`
+
+```python
 def _download(from_hf_path, file_name):
     os.makedirs(CACHE_DIR, exist_ok=True)
     hf_hub_download(repo_id=from_hf_path, filename=file_name, local_dir=CACHE_DIR)
+```
 
+This function downloads a model checkpoint from the Hugging Face Hub. It takes the following parameters:
+- `from_hf_path`: The repository ID on the Hugging Face Hub.
+- `file_name`: The name of the file to download.
 
+The function does not return any value.
+
+#### `InferenceContext`
+
+```python
 class InferenceContext:
     def __init__(self, benchmark=False):
         # we can't expect inputs to be the same length, so disable benchmarking by default
@@ -163,25 +249,42 @@ class InferenceContext:
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         torch.backends.cudnn.benchmark = self._cudnn_benchmark
+```
 
+This class provides a context manager for setting and restoring the cuDNN benchmark mode. It takes the following parameter:
+- `benchmark`: A boolean indicating whether to enable cuDNN benchmarking.
 
-if torch.cuda.is_available():
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+The class does not return any value.
 
+#### `_inference_mode`
 
+```python
 @contextlib.contextmanager
 def _inference_mode():
     with InferenceContext(), torch.inference_mode(), torch.no_grad(), autocast():
         yield
+```
 
+This function provides a context manager for inference mode, which includes disabling gradient computation and enabling mixed precision. It does not take any parameters.
 
+The function does not return any value.
+
+#### `_clear_cuda_cache`
+
+```python
 def _clear_cuda_cache():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+```
 
+This function clears the CUDA cache and synchronizes the device. It does not take any parameters.
 
+The function does not return any value.
+
+#### `clean_models`
+
+```python
 def clean_models(model_key=None):
     """
     Clean the models from memory.
@@ -196,8 +299,16 @@ def clean_models(model_key=None):
             del models[k]
     _clear_cuda_cache()
     gc.collect()
+```
 
+This function cleans the models from memory. It takes the following parameter:
+- `model_key`: An optional key of the model to clean. If None, it cleans all models.
 
+The function does not return any value.
+
+#### `_load_model`
+
+```python
 def _load_model(ckpt_path, device, use_small=False, model_type="text"):
     """
     Load a model from a checkpoint.
@@ -265,8 +376,19 @@ def _load_model(ckpt_path, device, use_small=False, model_type="text"):
             "tokenizer": tokenizer,
         }
     return model
+```
 
+This function loads a model from a checkpoint. It takes the following parameters:
+- `ckpt_path`: The path to the checkpoint file.
+- `device`: The device to load the model on.
+- `use_small`: An optional boolean indicating whether to use the small model. Defaults to False.
+- `model_type`: An optional string indicating the type of the model. Defaults to "text".
 
+The function returns the loaded model.
+
+#### `_load_codec_model`
+
+```python
 def _load_codec_model(device):
     """
     Load the codec model.
@@ -283,8 +405,16 @@ def _load_codec_model(device):
     model.to(device)
     _clear_cuda_cache()
     return model
+```
 
+This function loads the codec model. It takes the following parameter:
+- `device`: The device to load the model on.
 
+The function returns the loaded codec model.
+
+#### `load_model`
+
+```python
 def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="text"):
     """
     Load a model.
@@ -318,8 +448,19 @@ def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="te
     else:
         models[model_key].to(device)
     return models[model_key]
+```
 
+This function loads a model. It takes the following parameters:
+- `use_gpu`: An optional boolean indicating whether to use GPU. Defaults to True.
+- `use_small`: An optional boolean indicating whether to use the small model. Defaults to False.
+- `force_reload`: An optional boolean indicating whether to force reload the model. Defaults to False.
+- `model_type`: An optional string indicating the type of the model. Defaults to "text".
 
+The function returns the loaded model.
+
+#### `load_codec_model`
+
+```python
 def load_codec_model(use_gpu=True, force_reload=False):
     """
     Load the codec model.
@@ -347,8 +488,17 @@ def load_codec_model(use_gpu=True, force_reload=False):
         models[model_key] = model
     models[model_key].to(device)
     return models[model_key]
+```
 
+This function loads the codec model. It takes the following parameters:
+- `use_gpu`: An optional boolean indicating whether to use GPU. Defaults to True.
+- `force_reload`: An optional boolean indicating whether to force reload the model. Defaults to False.
 
+The function returns the loaded codec model.
+
+#### `preload_models`
+
+```python
 def preload_models(
     text_use_gpu=True,
     text_use_small=False,
@@ -389,13 +539,23 @@ def preload_models(
         model_type="fine", use_gpu=fine_use_gpu, use_small=fine_use_small, force_reload=force_reload
     )
     _ = load_codec_model(use_gpu=codec_use_gpu, force_reload=force_reload)
+```
 
+This function preloads all the necessary models for the pipeline. It takes the following parameters:
+- `text_use_gpu`: An optional boolean indicating whether to use GPU for the text model. Defaults to True.
+- `text_use_small`: An optional boolean indicating whether to use the small text model. Defaults to False.
+- `coarse_use_gpu`: An optional boolean indicating whether to use GPU for the coarse model. Defaults to True.
+- `coarse_use_small`: An optional boolean indicating whether to use the small coarse model. Defaults to False.
+- `fine_use_gpu`: An optional boolean indicating whether to use GPU for the fine model. Defaults to True.
+- `fine_use_small`: An optional boolean indicating whether to use the small fine model. Defaults to False.
+- `codec_use_gpu`: An optional boolean indicating whether to use GPU for the codec model. Defaults to True.
+- `force_reload`: An optional boolean indicating whether to force reload the models. Defaults to False.
 
-####
-# Generation Functionality
-####
+The function does not return any value.
 
+#### `_tokenize`
 
+```python
 def _tokenize(tokenizer, text):
     """
     Tokenize the input text.
@@ -408,8 +568,17 @@ def _tokenize(tokenizer, text):
         list: The tokenized text.
     """
     return tokenizer.encode(text, add_special_tokens=False)
+```
 
+This function tokenizes the input text. It takes the following parameters:
+- `tokenizer`: The tokenizer to use.
+- `text`: The input text.
 
+The function returns the tokenized text as a list.
+
+#### `_detokenize`
+
+```python
 def _detokenize(tokenizer, enc_text):
     """
     Detokenize the encoded text.
@@ -422,8 +591,17 @@ def _detokenize(tokenizer, enc_text):
         str: The detokenized text.
     """
     return tokenizer.decode(enc_text)
+```
 
+This function detokenizes the encoded text. It takes the following parameters:
+- `tokenizer`: The tokenizer to use.
+- `enc_text`: The encoded text.
 
+The function returns the detokenized text as a string.
+
+#### `_normalize_whitespace`
+
+```python
 def _normalize_whitespace(text):
     """
     Normalize whitespace in the input text.
@@ -435,14 +613,16 @@ def _normalize_whitespace(text):
         str: The normalized text.
     """
     return re.sub(r"\s+", " ", text).strip()
+```
 
+This function normalizes whitespace in the input text. It takes the following parameter:
+- `text`: The input text.
 
-TEXT_ENCODING_OFFSET = 10_048
-SEMANTIC_PAD_TOKEN = 10_000
-TEXT_PAD_TOKEN = 129_595
-SEMANTIC_INFER_TOKEN = 129_599
+The function returns the normalized text as a string.
 
+#### `_load_history_prompt`
 
+```python
 def _load_history_prompt(history_prompt_input):
     """
     Load the history prompt.
@@ -471,8 +651,16 @@ def _load_history_prompt(history_prompt_input):
     else:
         raise ValueError("history prompt format unrecognized")
     return history_prompt
+```
 
+This function loads the history prompt. It takes the following parameter:
+- `history_prompt_input`: The history prompt input, which can be a string or a dictionary.
 
+The function returns the loaded history prompt as a dictionary.
+
+#### `generate_text_semantic`
+
+```python
 def generate_text_semantic(
     text,
     history_prompt=None,
@@ -628,8 +816,25 @@ def generate_text_semantic(
     assert all(0 <= out) and all(out < SEMANTIC_VOCAB_SIZE)
     _clear_cuda_cache()
     return out
+```
 
+This function generates semantic tokens from text. It takes the following parameters:
+- `text`: The input text.
+- `history_prompt`: An optional history prompt. Defaults to None.
+- `temp`: An optional temperature for sampling. Defaults to 0.7.
+- `top_k`: An optional top-k sampling parameter. Defaults to None.
+- `top_p`: An optional top-p sampling parameter. Defaults to None.
+- `silent`: An optional boolean to disable the progress bar. Defaults to False.
+- `min_eos_p`: An optional minimum probability for early stopping. Defaults to 0.2.
+- `max_gen_duration_s`: An optional maximum generation duration in seconds. Defaults to None.
+- `allow_early_stop`: An optional boolean to allow early stopping. Defaults to True.
+- `use_kv_caching`: An optional boolean to use key-value caching. Defaults to False.
 
+The function returns the generated semantic tokens as a numpy array.
+
+#### `_flatten_codebooks`
+
+```python
 def _flatten_codebooks(arr, offset_size=CODEBOOK_SIZE):
     """
     Flatten the codebooks.
@@ -648,12 +853,17 @@ def _flatten_codebooks(arr, offset_size=CODEBOOK_SIZE):
             arr[n, :] += offset_size * n
     flat_arr = arr.ravel("F")
     return flat_arr
+```
 
+This function flattens the codebooks. It takes the following parameters:
+- `arr`: The input array.
+- `offset_size`: An optional offset size. Defaults to CODEBOOK_SIZE.
 
-COARSE_SEMANTIC_PAD_TOKEN = 12_048
-COARSE_INFER_TOKEN = 12_050
+The function returns the flattened codebooks as a numpy array.
 
+#### `generate_coarse`
 
+```python
 def generate_coarse(
     x_semantic,
     history_prompt=None,
@@ -828,154 +1038,11 @@ def generate_coarse(
         gen_coarse_audio_arr[n, :] -= n * CODEBOOK_SIZE
     _clear_cuda_cache()
     return gen_coarse_audio_arr
+```
 
-
-def generate_fine(
-    x_coarse_gen,
-    history_prompt=None,
-    temp=0.5,
-    silent=True,
-):
-    """
-    Generate full audio codes from coarse audio codes.
-
-    Args:
-        x_coarse_gen (np.ndarray): The input coarse audio codes.
-        history_prompt (str or dict, optional): The history prompt. Defaults to None.
-        temp (float, optional): The temperature for sampling. Defaults to 0.5.
-        silent (bool, optional): Whether to disable progress bar. Defaults to True.
-
-    Returns:
-        np.ndarray: The generated fine audio codes.
-    """
-    assert (
-        isinstance(x_coarse_gen, np.ndarray)
-        and len(x_coarse_gen.shape) == 2
-        and 1 <= x_coarse_gen.shape[0] <= N_FINE_CODEBOOKS - 1
-        and x_coarse_gen.shape[1] > 0
-        and x_coarse_gen.min() >= 0
-        and x_coarse_gen.max() <= CODEBOOK_SIZE - 1
-    )
-    if history_prompt is not None:
-        history_prompt = _load_history_prompt(history_prompt)
-        x_fine_history = history_prompt["fine_prompt"]
-        assert (
-            isinstance(x_fine_history, np.ndarray)
-            and len(x_fine_history.shape) == 2
-            and x_fine_history.shape[0] == N_FINE_CODEBOOKS
-            and x_fine_history.shape[1] >= 0
-            and x_fine_history.min() >= 0
-            and x_fine_history.max() <= CODEBOOK_SIZE - 1
-        )
-    else:
-        x_fine_history = None
-    n_coarse = x_coarse_gen.shape[0]
-    # load models if not yet exist
-    global models
-    global models_devices
-    if "fine" not in models:
-        preload_models()
-    model = models["fine"]
-    if OFFLOAD_CPU:
-        model.to(models_devices["fine"])
-    device = next(model.parameters()).device
-    # make input arr
-    in_arr = np.vstack(
-        [
-            x_coarse_gen,
-            np.zeros((N_FINE_CODEBOOKS - n_coarse, x_coarse_gen.shape[1]))
-            + CODEBOOK_SIZE,  # padding
-        ]
-    ).astype(np.int32)
-    # prepend history if available (max 512)
-    if x_fine_history is not None:
-        x_fine_history = x_fine_history.astype(np.int32)
-        in_arr = np.hstack(
-            [
-                x_fine_history[:, -512:].astype(np.int32),
-                in_arr,
-            ]
-        )
-        n_history = x_fine_history[:, -512:].shape[1]
-    else:
-        n_history = 0
-    n_remove_from_end = 0
-    # need to pad if too short (since non-causal model)
-    if in_arr.shape[1] < 1024:
-        n_remove_from_end = 1024 - in_arr.shape[1]
-        in_arr = np.hstack(
-            [
-                in_arr,
-                np.zeros((N_FINE_CODEBOOKS, n_remove_from_end), dtype=np.int32) + CODEBOOK_SIZE,
-            ]
-        )
-    # we can be lazy about fractional loop and just keep overwriting codebooks
-    n_loops = np.max([0, int(np.ceil((x_coarse_gen.shape[1] - (1024 - n_history)) / 512))]) + 1
-    with _inference_mode():
-        in_arr = torch.tensor(in_arr.T).to(device)
-        for n in tqdm.tqdm(range(n_loops), disable=silent):
-            start_idx = np.min([n * 512, in_arr.shape[0] - 1024])
-            start_fill_idx = np.min([n_history + n * 512, in_arr.shape[0] - 512])
-            rel_start_fill_idx = start_fill_idx - start_idx
-            in_buffer = in_arr[start_idx : start_idx + 1024, :][None]
-            for nn in range(n_coarse, N_FINE_CODEBOOKS):
-                logits = model(nn, in_buffer)
-                if temp is None:
-                    relevant_logits = logits[0, rel_start_fill_idx:, :CODEBOOK_SIZE]
-                    codebook_preds = torch.argmax(relevant_logits, -1)
-                else:
-                    relevant_logits = logits[0, :, :CODEBOOK_SIZE] / temp
-                    probs = F.softmax(relevant_logits, dim=-1)
-                    codebook_preds = torch.multinomial(
-                        probs[rel_start_fill_idx:1024], num_samples=1
-                    ).reshape(-1)
-                codebook_preds = codebook_preds.to(torch.int32)
-                in_buffer[0, rel_start_fill_idx:, nn] = codebook_preds
-                del logits, codebook_preds
-            # transfer over info into model_in and convert to numpy
-            for nn in range(n_coarse, N_FINE_CODEBOOKS):
-                in_arr[
-                    start_fill_idx : start_fill_idx + (1024 - rel_start_fill_idx), nn
-                ] = in_buffer[0, rel_start_fill_idx:, nn]
-            del in_buffer
-        gen_fine_arr = in_arr.detach().cpu().numpy().squeeze().T
-        del in_arr
-    if OFFLOAD_CPU:
-        model.to("cpu")
-    gen_fine_arr = gen_fine_arr[:, n_history:]
-    if n_remove_from_end > 0:
-        gen_fine_arr = gen_fine_arr[:, :-n_remove_from_end]
-    assert gen_fine_arr.shape[-1] == x_coarse_gen.shape[-1]
-    _clear_cuda_cache()
-    return gen_fine_arr
-
-
-def codec_decode(fine_tokens):
-    """
-    Turn quantized audio codes into audio array using encodec.
-
-    Args:
-        fine_tokens (np.ndarray): The input fine audio codes.
-
-    Returns:
-        np.ndarray: The decoded audio array.
-    """
-    # load models if not yet exist
-    global models
-    global models_devices
-    if "codec" not in models:
-        preload_models()
-    model = models["codec"]
-    if OFFLOAD_CPU:
-        model.to(models_devices["codec"])
-    device = next(model.parameters()).device
-    arr = torch.from_numpy(fine_tokens)[None]
-    arr = arr.to(device)
-    arr = arr.transpose(0, 1)
-    emb = model.quantizer.decode(arr)
-    out = model.decoder(emb)
-    audio_arr = out.detach().cpu().numpy().squeeze()
-    del arr, emb, out
-    if OFFLOAD_CPU:
-        model.to("cpu")
-    return audio_arr
+This function generates coarse audio codes from semantic tokens. It takes the following parameters:
+- `x_semantic`: The input semantic tokens.
+- `history_prompt`: An optional history prompt. Defaults to None.
+- `temp`: An optional temperature for sampling. Defaults to 0.7.
+- `top_k`: An optional top-k sampling parameter. Defaults to None.
+- `top_p`: An optional top-p sampling parameter. Defaults to None.

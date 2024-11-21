@@ -21,6 +21,12 @@ class LayerNorm(nn.Module):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 class CausalSelfAttention(nn.Module):
+    """
+    Causal self-attention layer for the GPT model.
+
+    This layer computes the attention scores for each token in the input sequence,
+    ensuring that each token only attends to previous tokens (causal attention).
+    """
 
     def __init__(self, config):
         super().__init__()
@@ -44,6 +50,18 @@ class CausalSelfAttention(nn.Module):
                                         .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x, past_kv=None, use_cache=False):
+        """
+        Forward pass for the causal self-attention layer.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, sequence_length, embedding_dim).
+            past_kv (tuple, optional): Tuple of past key and value tensors for caching. Defaults to None.
+            use_cache (bool, optional): Whether to use caching for faster inference. Defaults to False.
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, sequence_length, embedding_dim).
+            tuple: Tuple of present key and value tensors for caching.
+        """
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -92,6 +110,11 @@ class CausalSelfAttention(nn.Module):
         return (y, present)
 
 class MLP(nn.Module):
+    """
+    Multi-layer perceptron (MLP) for the GPT model.
+
+    This layer consists of two linear layers with a GELU activation in between.
+    """
 
     def __init__(self, config):
         super().__init__()
@@ -101,6 +124,15 @@ class MLP(nn.Module):
         self.gelu = nn.GELU()
 
     def forward(self, x):
+        """
+        Forward pass for the MLP layer.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, sequence_length, embedding_dim).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, sequence_length, embedding_dim).
+        """
         x = self.c_fc(x)
         x = self.gelu(x)
         x = self.c_proj(x)
@@ -108,6 +140,11 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
+    """
+    Transformer block for the GPT model.
+
+    This block consists of a causal self-attention layer followed by an MLP layer.
+    """
 
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -118,6 +155,18 @@ class Block(nn.Module):
         self.layer_idx = layer_idx
 
     def forward(self, x, past_kv=None, use_cache=False):
+        """
+        Forward pass for the transformer block.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, sequence_length, embedding_dim).
+            past_kv (tuple, optional): Tuple of past key and value tensors for caching. Defaults to None.
+            use_cache (bool, optional): Whether to use caching for faster inference. Defaults to False.
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, sequence_length, embedding_dim).
+            tuple: Tuple of present key and value tensors for caching.
+        """
         attn_output, prev_kvs = self.attn(self.ln_1(x), past_kv=past_kv, use_cache=use_cache)
         x = x + attn_output
         x = x + self.mlp(self.ln_2(x))
@@ -125,6 +174,19 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
+    """
+    Configuration class for the GPT model.
+
+    Attributes:
+        block_size (int): The maximum sequence length.
+        input_vocab_size (int): The size of the input vocabulary.
+        output_vocab_size (int): The size of the output vocabulary.
+        n_layer (int): The number of transformer layers.
+        n_head (int): The number of attention heads.
+        n_embd (int): The dimensionality of the embeddings.
+        dropout (float): The dropout rate.
+        bias (bool): Whether to use bias in the linear and layer normalization layers.
+    """
     block_size: int = 1024
     input_vocab_size: int = 10_048
     output_vocab_size: int = 10_048
@@ -135,6 +197,13 @@ class GPTConfig:
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
 class GPT(nn.Module):
+    """
+    GPT (Generative Pre-trained Transformer) model.
+
+    This model consists of multiple transformer blocks, each containing a causal self-attention layer
+    and an MLP layer. The model also includes token and position embeddings, as well as a final linear
+    layer for generating logits.
+    """
 
     def __init__(self, config):
         super().__init__()
@@ -158,6 +227,12 @@ class GPT(nn.Module):
         For non-embedding count (default), the position embeddings get subtracted.
         The token embeddings would too, except due to the parameter sharing these
         params are actually used as weights in the final layer, so we include them.
+
+        Args:
+            non_embedding (bool, optional): Whether to exclude the embedding parameters. Defaults to True.
+
+        Returns:
+            int: The number of parameters in the model.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
@@ -166,6 +241,20 @@ class GPT(nn.Module):
         return n_params
 
     def forward(self, idx, merge_context=False, past_kv=None, position_ids=None, use_cache=False):
+        """
+        Forward pass for the GPT model.
+
+        Args:
+            idx (torch.Tensor): Input tensor of shape (batch_size, sequence_length).
+            merge_context (bool, optional): Whether to merge context tokens. Defaults to False.
+            past_kv (tuple, optional): Tuple of past key and value tensors for caching. Defaults to None.
+            position_ids (torch.Tensor, optional): Tensor of position ids. Defaults to None.
+            use_cache (bool, optional): Whether to use caching for faster inference. Defaults to False.
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, sequence_length, embedding_dim).
+            tuple: Tuple of present key and value tensors for caching.
+        """
         device = idx.device
         b, t = idx.size()
         if past_kv is not None:
