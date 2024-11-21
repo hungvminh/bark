@@ -8,7 +8,17 @@ from .generation import SAMPLE_RATE
 
 
 def cli():
-    """Commandline interface."""
+    """Commandline interface for generating audio from text.
+
+    This function sets up the command-line argument parser, processes the input arguments,
+    generates audio from the provided text, and saves the output audio file.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--text", type=str, help="text to be turned into audio")
     parser.add_argument(

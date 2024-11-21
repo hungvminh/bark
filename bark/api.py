@@ -4,6 +4,7 @@ import numpy as np
 
 from .generation import codec_decode, generate_coarse, generate_fine, generate_text_semantic
 
+# This file contains functions for generating semantic arrays from text, converting semantic tokens to waveforms, saving prompts, and generating audio.
 
 def text_to_semantic(
     text: str,
@@ -35,7 +36,7 @@ def text_to_semantic(
 def semantic_to_waveform(
     semantic_tokens: np.ndarray,
     history_prompt: Optional[Union[Dict, str]] = None,
-    temp: float = 0.7,
+    temp: float = .7,
     silent: bool = False,
     output_full: bool = False,
 ):
@@ -75,6 +76,15 @@ def semantic_to_waveform(
 
 
 def save_as_prompt(filepath, full_generation):
+    """Save the full generation as a prompt file.
+
+    Args:
+        filepath: path to save the prompt file
+        full_generation: dictionary containing semantic, coarse, and fine prompts
+
+    Returns:
+        None
+    """
     assert(filepath.endswith(".npz"))
     assert(isinstance(full_generation, dict))
     assert("semantic_prompt" in full_generation)

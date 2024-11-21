@@ -325,3 +325,59 @@ os.environ["SUNO_USE_SMALL_MODELS"] = "True"
 
 #### My generated audio sounds like a 1980s phone call. What's happening?
 * Bark generates audio from scratch. It is not meant to create only high-fidelity, studio-quality speech. Rather, outputs could be anything from perfect speech to multiple people arguing at a baseball game recorded with bad microphones.
+
+## Codebase Overview
+
+### Purpose of Each File
+
+- `bark/api.py`: Contains functions for generating semantic arrays from text, converting semantic tokens to waveforms, saving prompts, and generating audio.
+- `bark/generation.py`: Contains the main generation functionality, including model loading, tokenization, and audio code generation.
+- `bark/cli.py`: Provides a command-line interface for generating audio from text.
+- `bark/model.py`: Defines the model architecture and configurations.
+- `bark/model_fine.py`: Defines the fine-tuned model architecture and configurations.
+- `notebooks`: Contains Jupyter notebooks for various use cases and memory profiling.
+- `README.md`: Provides an overview of the Bark project, installation instructions, and usage examples.
+- `pyproject.toml`: Specifies the project dependencies and build configuration.
+- `LICENSE`: Contains the MIT License for the project.
+- `bark/assets/prompts`: Contains various prompt files in `.npz` format for different languages and speakers.
+
+### Main Functions and Classes
+
+- `bark/api.py`:
+  - `text_to_semantic`: Generates a semantic array from text.
+  - `semantic_to_waveform`: Generates an audio array from semantic input.
+  - `save_as_prompt`: Saves the full generation as a prompt file.
+  - `generate_audio`: Generates an audio array from input text.
+
+- `bark/generation.py`:
+  - `generate_text_semantic`: Generates semantic tokens from text.
+  - `generate_coarse`: Generates coarse audio codes from semantic tokens.
+  - `generate_fine`: Generates full audio codes from coarse audio codes.
+  - `codec_decode`: Turns quantized audio codes into an audio array using Encodec.
+  - `preload_models`: Preloads all the necessary models for the pipeline.
+
+- `bark/cli.py`:
+  - `cli`: Command-line interface for generating audio from text.
+
+- `bark/model.py`:
+  - `GPTConfig`: Configuration class for the GPT model.
+  - `GPT`: GPT (Generative Pre-trained Transformer) model class.
+  - `LayerNorm`: Layer normalization class.
+  - `CausalSelfAttention`: Causal self-attention layer for the GPT model.
+  - `MLP`: Multi-layer perceptron (MLP) for the GPT model.
+  - `Block`: Transformer block for the GPT model.
+
+- `bark/model_fine.py`:
+  - `FineGPTConfig`: Configuration class for the FineGPT model.
+  - `FineGPT`: Fine-tuned GPT (Generative Pre-trained Transformer) model class.
+  - `NonCausalSelfAttention`: Non-causal self-attention layer for the FineGPT model.
+  - `FineBlock`: Transformer block for the FineGPT model.
+
+### How to Use the Codebase
+
+1. **Installation**: Follow the installation instructions provided in the [Installation](#-installation) section.
+2. **Preload Models**: Use the `preload_models` function to download and load all necessary models.
+3. **Generate Audio**: Use the `generate_audio` function to generate audio from text. You can also use the command-line interface by running the `bark` module with the appropriate arguments.
+4. **Save Audio**: Use the `write_wav` function from the `scipy.io.wavfile` module to save the generated audio to disk.
+5. **Explore Notebooks**: Check out the Jupyter notebooks in the `notebooks` directory for various use cases and memory profiling examples.
+

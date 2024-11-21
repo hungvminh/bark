@@ -13,6 +13,13 @@ from .model import GPT, GPTConfig, MLP
 
 
 class NonCausalSelfAttention(nn.Module):
+    """
+    Non-causal self-attention layer for the FineGPT model.
+
+    This layer computes the attention scores for each token in the input sequence,
+    allowing each token to attend to all other tokens (non-causal attention).
+    """
+
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -32,6 +39,15 @@ class NonCausalSelfAttention(nn.Module):
         )
 
     def forward(self, x):
+        """
+        Forward pass for the non-causal self-attention layer.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, sequence_length, embedding_dim).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, sequence_length, embedding_dim).
+        """
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -62,6 +78,12 @@ class NonCausalSelfAttention(nn.Module):
 
 
 class FineBlock(nn.Module):
+    """
+    Transformer block for the FineGPT model.
+
+    This block consists of a non-causal self-attention layer followed by an MLP layer.
+    """
+
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
@@ -70,12 +92,29 @@ class FineBlock(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
+        """
+        Forward pass for the transformer block.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, sequence_length, embedding_dim).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, sequence_length, embedding_dim).
+        """
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
 
 
 class FineGPT(GPT):
+    """
+    FineGPT (Fine-tuned Generative Pre-trained Transformer) model.
+
+    This model consists of multiple transformer blocks, each containing a non-causal self-attention layer
+    and an MLP layer. The model also includes token and position embeddings, as well as a final linear
+    layer for generating logits.
+    """
+
     def __init__(self, config):
         super().__init__(config)
         del self.lm_head
@@ -105,6 +144,16 @@ class FineGPT(GPT):
             self.transformer.wtes[i + 1].weight = self.lm_heads[i].weight
 
     def forward(self, pred_idx, idx):
+        """
+        Forward pass for the FineGPT model.
+
+        Args:
+            pred_idx (int): Index of the codebook to predict.
+            idx (torch.Tensor): Input tensor of shape (batch_size, sequence_length, n_codes_total).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, sequence_length, output_vocab_size).
+        """
         device = idx.device
         b, t, codes = idx.size()
         assert (
@@ -134,6 +183,12 @@ class FineGPT(GPT):
         For non-embedding count (default), the position embeddings get subtracted.
         The token embeddings would too, except due to the parameter sharing these
         params are actually used as weights in the final layer, so we include them.
+
+        Args:
+            non_embedding (bool, optional): Whether to exclude the embedding parameters. Defaults to True.
+
+        Returns:
+            int: The number of parameters in the model.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
@@ -145,5 +200,12 @@ class FineGPT(GPT):
 
 @dataclass
 class FineGPTConfig(GPTConfig):
+    """
+    Configuration class for the FineGPT model.
+
+    Attributes:
+        n_codes_total (int): The total number of codebooks.
+        n_codes_given (int): The number of given codebooks.
+    """
     n_codes_total: int = 8
     n_codes_given: int = 1
